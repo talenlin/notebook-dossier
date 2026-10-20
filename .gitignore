@@ -1,0 +1,11 @@
+# 运行时数据（含账号相关内容，严禁入库）
+.nlm-app/
+*.sqlite3
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.pytest_cache/

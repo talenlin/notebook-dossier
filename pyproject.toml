@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "notebook-dossier"
+version = "0.1.0"
+description = "NotebookLM Deep Research MCP: 研究启动、来源取证、观点比较与文章研究底稿导出"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "fastmcp>=2.0,<5.0",
+    "pydantic>=2.0,<3.0",
+    "platformdirs>=4.0,<5.0",
+]
+
+[project.optional-dependencies]
+# 固定上游适配器版本（提交 a277ce7 == 0.15.5），提供 notebooklm-mcp 命令与登录管理。
+upstream = [
+    "notebooklm-mcp-cli @ git+https://github.com/jacob-bd/gemini-notebook-mcp-cli@a277ce7b81196222f79724b21973e17fc610999d",
+]
+
+[project.scripts]
+notebook-dossier = "notebook_dossier.server:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/notebook_dossier"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+pythonpath = ["src", "tests"]
