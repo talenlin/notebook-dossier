@@ -1,5 +1,7 @@
 # notebook-dossier
 
+NotebookLM Deep Research as an MCP server: start deep research, keep every source, verify each claim against the original text, compare viewpoints, and export a citation-grounded writing brief. Evidence-first knowledge groundwork for writers, analysts, and patent practitioners.
+
 把 NotebookLM Deep Research 封装成 MCP，服务「写文章前的知识调研」：
 
 **研究主题 → 深度检索 → 保存完整来源 → 逐篇核验依据 → 比较共识与分歧 → 输出文章研究底稿。**

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "notebook-dossier"
 version = "0.1.0"
-description = "NotebookLM Deep Research MCP: 研究启动、来源取证、观点比较与文章研究底稿导出"
+description = "NotebookLM Deep Research as an MCP server: start deep research, keep every source, verify each claim against the original text, compare viewpoints, and export a citation-grounded writing brief. Evidence-first knowledge groundwork for writers, analysts, and patent practitioners."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
