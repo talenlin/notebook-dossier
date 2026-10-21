@@ -13,13 +13,17 @@ import contextlib
 import hashlib
 import json
 import os
+import re
+import time
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
 
+from .citation import build_cite_map, check_citations, dedupe_warnings
 from .compare import build_comparison
 from .config import Config, load_config
 from .evidence import parse_extraction, verify_quote
@@ -59,7 +63,7 @@ from .provider.base import ProviderError, ResearchProvider
 from .provider.upstream import UpstreamMcpProvider
 from .stats import coverage_summary
 from .store import Store
-from .utils import canonicalize_url, sha256_text, squash
+from .utils import canonicalize_url, extractive_takeaway, sha256_text, squash
 
 _QUERY_RESULT_NOTE = "引文编号仅在本回答内有效（引用键格式 research_id:answer_seq#编号），跨回答不可合并。"
 
@@ -299,7 +303,20 @@ class App:
             "next_action": "dossier_status（Deep Research 通常需数分钟，建议 30 秒后查询）",
         }
 
-    async def research_status(self, research_id: str) -> dict[str, Any]:
+    async def research_status(self, research_id: str, wait_seconds: float = 0) -> dict[str, Any]:
+        """C 项：wait_seconds>0 时服务端长轮询，把 N 次轮询压成 1 次调用（封顶 300s）。"""
+        deadline = time.monotonic() + max(0.0, min(float(wait_seconds or 0), 300.0))
+        while True:
+            remaining = max(0, int(deadline - time.monotonic()))
+            out = await self._research_status_once(research_id, max_wait=min(60, remaining))
+            in_progress = out.get("upstream_state") == "in_progress"
+            if not wait_seconds or not in_progress or out.get("status") != "success":
+                return out
+            if time.monotonic() >= deadline:
+                out["wait_expired"] = True
+                return out
+
+    async def _research_status_once(self, research_id: str, max_wait: int = 0) -> dict[str, Any]:
         job, err_out = self._job_or_error(research_id)
         if err_out:
             return err_out
@@ -322,7 +339,7 @@ class App:
                 task_id=job.upstream_task_id,
                 query=job.topic,
                 compact=False,
-                max_wait=0,
+                max_wait=max_wait,
             )
         except ProviderError as exc:
             out = exc.as_dict()
@@ -377,18 +394,33 @@ class App:
                 errors=_append_once(job.errors, "上游返回 no_research：刚启动的任务可能暂不可见，或任务 ID 匹配失败；稍后重查，勿重复发起"),
             )
 
+        cov = coverage_summary(self.store, research_id)
+        elapsed_ms = _elapsed_ms(job.created_at)
+        discovered = resp.get("sources_found") or len(resp.get("sources") or []) or cov.get("discovered") or 0
+        if upstream_state == "in_progress":
+            poll = 20 if elapsed_ms < 120_000 else (45 if elapsed_ms < 360_000 else 90)
+        else:
+            poll = 0
+        warn_by_sev: dict[str, int] = {}
+        for w in job.citation_warnings:
+            sev = str(w.get("severity") or "unknown")
+            warn_by_sev[sev] = warn_by_sev.get(sev, 0) + 1
         return {
             "status": "success",
             "research_id": research_id,
             "upstream_state": upstream_state,
             "job_status": job.status.value,
+            "phase": self._phase(research_id, job, upstream_state),
+            "elapsed_ms": elapsed_ms,
+            "sources_discovered": discovered,
             "task_id_observed": observed_task_id,
             "task_id_conflict": job.task_id_conflict,
             "task_id_note": task_id_note,
-            "coverage": coverage_summary(self.store, research_id),
+            "coverage": cov,
             "progress": self._source_progress(research_id),
+            "citation_warnings_summary": warn_by_sev,
             "errors": job.errors,
-            "suggested_next_poll_seconds": 0 if upstream_state != "in_progress" else 30,
+            "suggested_next_poll_seconds": poll,
             "next_action": (
                 "dossier_result(view='findings') 查看完整发现结果"
                 if upstream_state == "completed"
@@ -433,15 +465,94 @@ class App:
                     provenance_group=provenance,
                 )
             )
+        # B/D：cite_map 自检 + 标题层引用校验（第一层，零成本；全文层在原文预取后重算覆盖）
+        report_sid = next(
+            (
+                f"{research_id}.s{pos:03d}"
+                for pos, raw in enumerate(raw_sources)
+                if isinstance(raw, dict)
+                and (not raw.get("url") or "report" in str(raw.get("result_type") or "").lower())
+            ),
+            None,
+        )
+        titles = {
+            f"{research_id}.s{pos:03d}": squash(str(raw.get("title") or ""))
+            for pos, raw in enumerate(raw_sources)
+            if isinstance(raw, dict) and raw.get("title")
+        }
+        cite_map, basis = build_cite_map(report, titles, report_sid or "")
+        # 标题层只查案号/法条类高价值实体：标题不含普通数字，全查会制造噪音
+        warnings, score = check_citations(
+            report, titles, cite_map, tier="title", kinds={"case_cn", "statute_cn", "case_us", "statute_us"}
+        )
         self.store.update_job(
             research_id,
             report_path=str(report_path),
             report_text_hash=sha256_text(report),
             report_saved_at=now,
+            cite_map=cite_map,
+            cite_map_basis=basis,
+            citation_warnings=dedupe_warnings(warnings),
+            citation_score=score,
+        )
+
+    def _phase(self, research_id: str, job: ResearchJob, upstream_state: str | None) -> str:
+        """C 项：流水线相位。上游 deep research 内部阶段不可见，如实映射我们自己的阶段。"""
+        if job.status == JobStatus.error:
+            return "error"
+        if upstream_state == "in_progress" or job.status == JobStatus.researching:
+            return "researching"
+        running = [t for t in self.store.list_tasks(research_id) if t.status == TaskStatus.running]
+        if running:
+            return {
+                "source_text_fetch": "fetching_texts",
+                "evidence_build": "analyzing",
+                "viewpoints_compare": "comparing",
+            }.get(running[0].kind, running[0].kind)
+        if not coverage_summary(self.store, research_id).get("imported"):
+            return "awaiting_import"
+        return "ready"
+
+    def _takeaway_for(self, research_id: str, s: SourceRow) -> str | None:
+        """D 项：提取式一句话摘要（takeaway_extractive）；导入并抓取原文后才有，无文本不编造。"""
+        record = self.store.get_source_text(research_id, s.source_id)
+        if record and record.text_path and Path(record.text_path).exists():
+            return extractive_takeaway(Path(record.text_path).read_text(encoding="utf-8"))
+        return None
+
+    def _refresh_citation_check(self, research_id: str) -> None:
+        """text 层引用校验：用已抓取原文重算 cite_map 与告警；无文本来源记 unverifiable。"""
+        job = self.store.get_job(research_id)
+        if job is None or not job.report_path or not Path(job.report_path).exists():
+            return
+        report = Path(job.report_path).read_text(encoding="utf-8")
+        corpus: dict[str, str] = {}
+        report_sid = None
+        unverified: set[str] = set()
+        for s in self.store.list_sources(research_id):
+            if s.is_report:
+                report_sid = s.source_id
+                continue
+            record = self.store.get_source_text(research_id, s.source_id)
+            text = None
+            if record and record.text_path and Path(record.text_path).exists():
+                text = Path(record.text_path).read_text(encoding="utf-8")
+            if text:
+                corpus[s.source_id] = text
+            else:
+                unverified.add(s.source_id)
+        cite_map, basis = build_cite_map(report, corpus, report_sid or "")
+        warnings, score = check_citations(report, corpus, cite_map, tier="text", unverified_ids=unverified)
+        self.store.update_job(
+            research_id,
+            cite_map=cite_map,
+            cite_map_basis=basis,
+            citation_warnings=dedupe_warnings(warnings),
+            citation_score=score,
         )
 
     def research_result(
-        self, research_id: str, view: str, cursor: int, limit: int, include_report_text: bool
+        self, research_id: str, view: str, cursor: int, limit: int, include_report_text: bool, max_chars: int = 12000
     ) -> dict[str, Any]:
         job, err_out = self._job_or_error(research_id)
         if err_out:
@@ -493,10 +604,19 @@ class App:
                         "read_status": s.read_status.value,
                         "analyzed_status": s.analyzed_status.value,
                         "provenance_group": s.provenance_group,
+                        "one_line_takeaway": self._takeaway_for(research_id, s),
                     }
                     for s in page
                 ],
+                "cite_map": job.cite_map,
+                "cite_map_basis": job.cite_map_basis,
+                "citation_warnings": job.citation_warnings[:50],
+                "citation_score": job.citation_score,
                 "coverage": coverage_summary(self.store, research_id),
+                "next_action": (
+                    "报告全文分页 view='report'（cursor=字符偏移，max_chars=窗口大小）；"
+                    "执行摘要 view='digest'；导出研究底稿 dossier_export(output_dir=...)"
+                ),
             }
 
         if view in ("evidence", "comparisons", "tasks", "answers"):
@@ -521,10 +641,66 @@ class App:
                 "items": [r.model_dump(mode="json") for r in page_rows],
             }
 
+        if view in ("report", "digest"):
+            # E 项：报告分页（view=report）与提取式执行摘要（view=digest）
+            if not job.report_path or not Path(job.report_path).exists():
+                return err(NOT_FOUND, "尚无报告（研究未完成或未同步）", research_id=research_id)
+            text = Path(job.report_path).read_text(encoding="utf-8")
+            sections = [
+                {"heading": m.group(1).strip(), "offset": m.start()}
+                for m in re.finditer(r"(?m)^##\s+(.+)$", text)
+            ]
+            if view == "report":
+                window = max(1, min(max_chars, 50000))
+                offset = max(0, cursor)
+                snippet = text[offset : offset + window]
+                return {
+                    "status": "success",
+                    "research_id": research_id,
+                    "view": view,
+                    "total_chars": len(text),
+                    "offset": offset,
+                    "next_offset": offset + len(snippet) if offset + len(snippet) < len(text) else None,
+                    "sections": sections,
+                    "text": snippet,
+                    "report_path": job.report_path,
+                    "next_action": "续页传 cursor=next_offset；导出研究底稿 dossier_export(output_dir=...)",
+                }
+            intro = text.split("\n## ", 1)[0]
+            conclusion = ""
+            for i, sec in enumerate(sections):
+                if any(k in sec["heading"] for k in ("结论", "总结", "Conclusion")):
+                    end = sections[i + 1]["offset"] if i + 1 < len(sections) else len(text)
+                    conclusion = text[sec["offset"] : end]
+            digest_text = _trim_at_sentence(intro, 800)
+            if conclusion:
+                digest_text += "\n\n" + _trim_at_sentence(conclusion, 650)
+            warn_by_sev: dict[str, int] = {}
+            for w in job.citation_warnings:
+                sev = str(w.get("severity") or "unknown")
+                warn_by_sev[sev] = warn_by_sev.get(sev, 0) + 1
+            top_sources = [
+                {"source_id": s.source_id, "title": s.title, "url": s.original_url}
+                for s in self.store.list_sources(research_id)
+                if s.cited_in_report and not s.is_report
+            ][:10]
+            return {
+                "status": "success",
+                "research_id": research_id,
+                "view": view,
+                "digest_text": digest_text[:1500],
+                "extractive": True,
+                "top_sources": top_sources,
+                "citation_warnings_summary": warn_by_sev,
+                "coverage": coverage_summary(self.store, research_id),
+                "report_path": job.report_path,
+                "next_action": "全文 view='report'（cursor/max_chars 分页）；导出 dossier_export(output_dir=...)",
+            }
+
         return err(
             INVALID_ARGS,
             f"未知 view: {view}",
-            hint="view 可选 findings | evidence | comparisons | tasks | answers",
+            hint="view 可选 findings | report | digest | evidence | comparisons | tasks | answers",
         )
 
     async def research_import(
@@ -882,6 +1058,7 @@ class App:
                     errors.append(f"{source_id}: {exc.message}")
         if not self._still_ours(task_id):
             return
+        self._refresh_citation_check(research_id)
         self.store.update_task(
             task_id,
             status=TaskStatus.completed if not errors else TaskStatus.error,
@@ -1395,6 +1572,23 @@ class App:
             )
 
 
+def _elapsed_ms(created_at: str) -> int:
+    try:
+        dt = datetime.fromisoformat(created_at)
+        return max(0, int((datetime.now(dt.tzinfo) - dt).total_seconds() * 1000))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _trim_at_sentence(text: str, limit: int) -> str:
+    t = (text or "").strip()
+    if len(t) <= limit:
+        return t
+    cut = t[:limit]
+    idx = max(cut.rfind("。"), cut.rfind(". "), cut.rfind("\n"))
+    return (cut[: idx + 1] if idx > limit // 2 else cut).strip()
+
+
 def _append_once(errors: list[str], message: str) -> list[str]:
     return errors if message in errors else errors + [message]
 
@@ -1447,14 +1641,19 @@ def build_server(config: Config | None = None, provider: ResearchProvider | None
             return exc.as_dict()
 
     @mcp.tool
-    async def dossier_status(research_id: str) -> dict[str, Any]:
-        """查询研究任务状态（非阻塞单次检查），并同步完整报告与发现来源清单。
+    async def dossier_status(research_id: str, wait_seconds: float = 0) -> dict[str, Any]:
+        """查询研究任务状态，并同步完整报告与发现来源清单。
 
         完成时会保存 compact=False 的完整结果；来源统计与发现/导入不是同一指标。
+        返回 phase/elapsed_ms/sources_discovered 与自适应 suggested_next_poll_seconds。
+
+        Args:
+            research_id: 研究任务 ID。
+            wait_seconds: >0 时服务端长轮询（封顶 300s）：阻塞到状态变化或超时，把 N 次轮询压成 1 次调用。
         """
-        app.audit("dossier_status", research_id=research_id)
+        app.audit("dossier_status", research_id=research_id, wait_seconds=wait_seconds)
         try:
-            return await app.research_status(research_id)
+            return await app.research_status(research_id, wait_seconds)
         except ProviderError as exc:
             return exc.as_dict()
 
@@ -1465,10 +1664,14 @@ def build_server(config: Config | None = None, provider: ResearchProvider | None
         cursor: int = 0,
         limit: int = 20,
         include_report_text: bool = False,
+        max_chars: int = 12000,
     ) -> dict[str, Any]:
-        """分页读取研究结果。view: findings | evidence | comparisons | tasks | answers。
+        """分页读取研究结果。view: findings | report | digest | evidence | comparisons | tasks | answers。
 
-        findings 为完整发现来源（非简略列表）；报告全文可选，截断时会明确标注。
+        findings 为完整发现来源（含 cite_map、citation_warnings、逐来源提取式摘要）；
+        report 为报告全文分页（cursor=字符偏移、max_chars=窗口）；
+        digest 为提取式执行摘要（≤1500 字 + 高被引来源清单）；
+        include_report_text 仅作用于 findings 视图的报告内嵌（旧口径，建议改用 view='report'）。
         """
         app.audit(
             "dossier_result",
@@ -1477,8 +1680,9 @@ def build_server(config: Config | None = None, provider: ResearchProvider | None
             cursor=cursor,
             limit=limit,
             include_report_text=include_report_text,
+            max_chars=max_chars,
         )
-        return app.research_result(research_id, view, cursor, limit, include_report_text)
+        return app.research_result(research_id, view, cursor, limit, include_report_text, max_chars)
 
     @mcp.tool
     async def dossier_import(

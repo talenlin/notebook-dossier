@@ -123,6 +123,10 @@ class ResearchJob(BaseModel):
     report_path: str | None = None
     report_text_hash: str | None = None
     report_saved_at: str | None = None
+    cite_map: dict[str, str] = Field(default_factory=dict)
+    cite_map_basis: str | None = None
+    citation_warnings: list[dict[str, Any]] = Field(default_factory=list)
+    citation_score: dict[str, Any] | None = None
     errors: list[str] = Field(default_factory=list)
     created_at: str = Field(default_factory=utcnow_iso)
     updated_at: str = Field(default_factory=utcnow_iso)

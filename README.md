@@ -106,8 +106,8 @@ OMP 的用户级配置在 `~/.omp/agent/mcp.json`（`mcpServers` 里加条目后
 | --- | --- |
 | `dossier_auth_status` | 本地/在线登录状态（不返回凭据）与下一步动作 |
 | `dossier_start` | 启动 Deep Research（web + deep），返回 `research_id`；`request_key` 幂等，同键不重复发起 |
-| `dossier_status` | 非阻塞查状态；完成时保存完整报告与**全量**发现来源（`compact=False`）；返回逐来源 `progress`（导入/读取/分析状态与证据卡数） |
-| `dossier_result` | 分页读取：`findings / evidence / comparisons / tasks / answers`；任务 result 含 `done/failed/skipped` 逐（来源,问题）进度 |
+| `dossier_status` | 查状态并同步完整报告与**全量**发现来源；返回 `phase / elapsed_ms / sources_discovered / progress` 与自适应轮询建议；`wait_seconds>0` 服务端长轮询（封顶 300s） |
+| `dossier_result` | 分页读取：`findings / report / digest / evidence / comparisons / tasks / answers`；findings 含 `cite_map / citation_warnings / one_line_takeaway`；report 按 `cursor/max_chars` 分页；digest 为提取式执行摘要（≤1500 字） |
 | `dossier_import` | 导入并逐来源记录映射；**收尾自动对账**（按 Notebook 实际来源清单回填漏配，`auto_reconcile` 报告结果）；`reconcile_only=True` 单独对账；`confirm_task_id` 人工放行任务 ID 冲突 |
 | `dossier_source_get` | 单来源元数据 + 索引文本摘录（含内容版本哈希、取得时间） |
 | `dossier_query` | 指定 `source_ids` 提问（软件强制来源范围，默认新会话）；引文编号仅在本回答内有效 |
@@ -139,6 +139,13 @@ OMP 的用户级配置在 `~/.omp/agent/mcp.json`（`mcpServers` 里加条目后
 | `export_refused` | 导出触发凭据/内容守卫 | 修正数据后重试 |
 
 任务 ID 归一化：一研究一 Notebook，「本 Notebook 内完成态 + 有报告」时任务 ID 表示形式变化（base64 型 vs UUID 型）自动采纳并在 `task_id_note` 留痕；完成态无报告等语义存疑情形才保留 `task_id_conflict` 守门。
+
+## 报告质量与可观测性
+
+1. **引用一致性校验**：报告 `[cite: N]` 论断中的案号/法条号/判例报告号/日期/数字与被引来源做实体级比对，输出 `citation_warnings`（`claim / source_says / severity`）。两层：findings 同步后用来源**标题**先查案号/法条类高价值实体（零成本）；原文预取后对**全文**重算。只抓编号级错配，不冒充语义核验；来源无文本记 `unverifiable`，不谎报通过。
+2. **进度可见**：`phase`（researching → awaiting_import → fetching_texts → analyzing → comparing → ready）、`elapsed_ms`、`sources_discovered`、自适应 `suggested_next_poll_seconds`（20s→45s→90s）；`dossier_status(wait_seconds=N)` 长轮询把 N 次轮询压成 1 次调用。
+3. **中间态可读**：findings 返回 `cite_map`（cite 编号 → 稳定 source_id，报告自身不占引用位）与 `cite_map_basis`（`validated/ambiguous/assumed`：用实体命中率对编号假设自检，不给假确定性）；每来源 `one_line_takeaway`（提取式，导入取原文后才有）。
+4. **结果体积**：`view=report` 按 `cursor`（字符偏移）+ `max_chars` 分页并给章节清单；`view=digest` 提取式执行摘要（开篇综述 + 结论段 + 高被引来源 + 告警统计，≤1500 字）；findings/report 均带 `next_action` 提示 `dossier_export`。
 
 ## 软件强制的证据规则
 
@@ -178,6 +185,11 @@ OMP 的用户级配置在 `~/.omp/agent/mcp.json`（`mcpServers` 里加条目后
 - 转载识别是近似：同规范 URL / 同内容哈希归并；不同转载 URL 的同稿无法自动识别，可在 `sources.json` 人工改 `provenance_group`。
 - fastmcp 4 客户端与上游（较旧 SDK）握手时，上游 stderr 会打印 `server/discover` 校验告警；工具调用不受影响。
 - 可选后端（Gemini API Deep Research、NotebookLM Enterprise API）未接入；需要时另做 provider。
+
+- cite 编号语义由上游生成且未文档化：`cite_map` 基于「报告自身不占引用位」假设并用实体命中率自检，`cite_map_basis` 如实标注 validated/ambiguous/assumed。
+- 引用校验为编号/数字级，抓不到不带数字的语义歪曲（判例要旨张冠李戴但无编号时无告警）；`unverifiable` 表示来源文本不可得，绝非「校验通过」。
+- deep research 进行中上游不暴露已发现来源数：`sources_discovered` 在完成时准确（或透传上游 `sources_found`），研究中只有 `phase` 可见。
+- `one_line_takeaway` 与 `digest` 均为提取式（原文首句 / 开篇+结论段拼接），不是模型重写摘要。
 
 ## 测试与验收
 

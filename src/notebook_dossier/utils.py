@@ -30,3 +30,22 @@ def sha256_text(text: str) -> str:
 
 def squash(text: str) -> str:
     return _WS_RE.sub(" ", text or "").strip()
+
+
+_BOILERPLATE_RE = re.compile(
+    r"cookie|disclaimer|copyright|subscribe|privacy|newsletter|all rights reserved|"
+    r"如果.{0,6}问题|版权所有|免责声明|沪ICP|京ICP|关注我们|登录后",
+    re.IGNORECASE,
+)
+
+
+def extractive_takeaway(text: str | None, max_len: int = 120) -> str | None:
+    """提取式一句话摘要：取首个有效句，跳过 cookie/免责声明等样板（takeaway_extractive）。"""
+    if not text:
+        return None
+    for chunk in re.split(r"(?<=[。！？.!?；;])|\n", text):
+        s = squash(chunk)
+        if len(s) < 8 or _BOILERPLATE_RE.search(s):
+            continue
+        return s if len(s) <= max_len else s[: max_len - 1] + "…"
+    return None
