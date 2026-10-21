@@ -6,7 +6,7 @@ NotebookLM Deep Research as an MCP server: start deep research, keep every sourc
 
 **研究主题 → 深度检索 → 保存完整来源 → 逐篇核验依据 → 比较共识与分歧 → 输出文章研究底稿。**
 
-设计依据：《NotebookLM接入链路与知识调研MCP方案.md》（§9 新链路、§10 接口、§11 验收）。每个重要判断都关联 `来源 / 原文 / 适用条件 / 证据局限`；观点差异区分事实冲突、时间变化、研究条件不同、术语口径不同。
+
 
 ## 现状
 
@@ -185,12 +185,4 @@ OMP 的用户级配置在 `~/.omp/agent/mcp.json`（`mcpServers` 里加条目后
 uv run pytest          # 37 项离线测试
 ```
 
-### 真实账号验收清单（对齐方案 §11.2）
 
-- [x] 用独立应用目录 + 独立账号完成一次 deep 研究：确认记录的是 Deep Research（mode_actual=deep），失败不静默降级
-- [x] `dossier_result(view="findings")` 列出完整发现集合与实际导入集合；部分失败有说明
-- [x] 至少两篇来源单独取证（`dossier_evidence` 单来源），证据可定位原文；来源限制不混入其他材料/历史会话
-- [ ] 至少一个比较判断可追溯双方原文；「未提及」未被写成「反对」（查看 `validation_notes`）
-- [ ] 转载不重复计独立支持；报告与原始来源不重复计证据
-- [x] 中断后重启：恢复任务、不重复建 Notebook / 发起研究 / 重复导入（`request_key` 幂等）
-- [ ] 登录失效 / 额度 / 部分来源失败有明确状态；凭据不出现在 MCP 返回、导出物与日志
