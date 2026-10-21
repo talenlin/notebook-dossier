@@ -38,7 +38,7 @@ uv sync                                  # 本服务依赖 + dev（pytest）
 uv sync --extra upstream                 # 可选：安装固定版本上游（提供 notebooklm-mcp 命令）
 ```
 
-上游登录（**使用独立 Google 账号/Profile，不要复用 OA阅答的认证目录**）：
+上游登录（**使用独立 Google 账号/Profile**）：
 
 ```bash
 .venv\Scripts\nlm.exe login --profile research --storage protected   # 弹浏览器窗口，自己完成 Google 登录
