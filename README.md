@@ -11,7 +11,7 @@ NotebookLM Deep Research as an MCP server: start deep research, keep every sourc
 ## 现状
 
 - 已实现：MCP 服务器（10 个工具 `dossier_*`）、SQLite 任务存储、上游 `notebooklm-mcp` 适配器、逐来源证据卡、观点比较不变量、研究底稿导出。
-- 验证：`tests/` 37 项通过（幂等启动、跳过续跑、任务租约与心跳、调用审计、导入对账、错误信封、导出守卫）；stdio 冒烟 tools/list 通过；真实账号验收完成一轮（2026-10-16：deep 模式确认、46 来源发现、36 导入 + 9 对账未命中、4 来源 47 证据卡、限定来源问答，详见文末清单）。
+- 验证：`tests/` 43 项通过（幂等启动、跳过续跑、任务租约与心跳、调用审计、导入对账、错误信封、导出守卫）；stdio 冒烟 tools/list 通过；真实账号验收完成一轮（2026-10-16：deep 模式确认、46 来源发现、36 导入 + 9 对账未命中、4 来源 47 证据卡、限定来源问答，详见文末清单）。
 - 未做：观点比较、转载去重、登录失效路径的真实账号验收（清单未勾项）。
 
 ## 架构
@@ -194,7 +194,7 @@ OMP 的用户级配置在 `~/.omp/agent/mcp.json`（`mcpServers` 里加条目后
 ## 测试与验收
 
 ```bash
-uv run pytest          # 37 项离线测试
+uv run pytest          # 43 项离线测试
 ```
 
 
